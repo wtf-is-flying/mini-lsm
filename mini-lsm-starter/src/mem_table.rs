@@ -38,15 +38,6 @@ pub struct MemTable {
     approximate_size: Arc<AtomicUsize>,
 }
 
-/// Create a bound of `Bytes` from a bound of `&[u8]`.
-pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
-        Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
-        Bound::Unbounded => Bound::Unbounded,
-    }
-}
-
 impl MemTable {
     /// Week 1 Day 1: create the plain in-memory memtable.
     pub fn create(id: usize) -> Self {
@@ -119,8 +110,23 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        let mut iter = MemTableIteratorBuilder {
+            map: self.map.clone(),
+            iter_builder: |map| {
+                map.range((
+                    lower.map(Bytes::copy_from_slice),
+                    upper.map(Bytes::copy_from_slice),
+                ))
+            },
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+
+        // `next()` currently cannot fail
+        iter.next().unwrap();
+
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -166,18 +172,25 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.borrow_item().1
     }
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        KeySlice::from_slice(&self.borrow_item().0)
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let next = self
+            .with_iter_mut(|iter| iter.next())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .unwrap_or_else(|| (Bytes::from_static(&[]), Bytes::from_static(&[])));
+
+        self.with_item_mut(|current| *current = next);
+
+        Ok(())
     }
 }

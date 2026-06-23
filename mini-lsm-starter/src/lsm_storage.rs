@@ -16,6 +16,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
+use std::iter;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -380,10 +382,19 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let iterators = {
+            let state = self.state.read();
+            iter::once(state.memtable.clone())
+                .chain(state.imm_memtables.iter().cloned())
+                .map(|memtable| memtable.scan(lower, upper))
+                .map(Box::new)
+                .collect()
+        };
+        let merge_iterator = MergeIterator::create(iterators);
+        LsmIterator::new(merge_iterator).map(FusedIterator::new)
     }
 
     fn put_and_maybe_freeze(&self, key: &[u8], value: &[u8]) -> Result<()> {
