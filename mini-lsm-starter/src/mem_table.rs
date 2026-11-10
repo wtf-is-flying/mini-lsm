@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2026 Alex Chi Z
+// Copyright (c) 2023-2026 Alex Chi Z
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -41,19 +38,15 @@ pub struct MemTable {
     approximate_size: Arc<AtomicUsize>,
 }
 
-/// Create a bound of `Bytes` from a bound of `&[u8]`.
-pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
-        Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
-        Bound::Unbounded => Bound::Unbounded,
-    }
-}
-
 impl MemTable {
     /// Week 1 Day 1: create the plain in-memory memtable.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        Self {
+            map: Arc::new(SkipMap::new()),
+            wal: None,
+            id,
+            approximate_size: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Week 2 Day 6: create a memtable backed by a write-ahead log.
@@ -86,8 +79,8 @@ impl MemTable {
     }
 
     /// Week 1 Day 1: get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the memtable.
@@ -95,8 +88,13 @@ impl MemTable {
     /// Week 1 Day 1: put the key-value pair into the in-memory map.
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.map
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        // NOTE: if a key is put twice, it is counted twice in the approximate_size.
+        self.approximate_size
+            .fetch_add(key.len() + value.len(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// Week 3 Day 5: put a batch of key-value pairs.
@@ -112,8 +110,23 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        let mut iter = MemTableIteratorBuilder {
+            map: self.map.clone(),
+            iter_builder: |map| {
+                map.range((
+                    lower.map(Bytes::copy_from_slice),
+                    upper.map(Bytes::copy_from_slice),
+                ))
+            },
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+
+        // `next()` currently cannot fail
+        iter.next().unwrap();
+
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -125,9 +138,9 @@ impl MemTable {
         self.id
     }
 
+    /// The approximate size of this [`MemTable`], in bytes.
     pub fn approximate_size(&self) -> usize {
-        self.approximate_size
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.approximate_size.load(Ordering::Relaxed)
     }
 
     /// Only use this function when closing the database
@@ -159,18 +172,25 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.borrow_item().1
     }
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        KeySlice::from_slice(&self.borrow_item().0)
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let next = self
+            .with_iter_mut(|iter| iter.next())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .unwrap_or_else(|| (Bytes::from_static(&[]), Bytes::from_static(&[])));
+
+        self.with_item_mut(|current| *current = next);
+
+        Ok(())
     }
 }

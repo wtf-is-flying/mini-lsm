@@ -16,6 +16,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
+use std::iter;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -297,8 +299,15 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let state = self.state.read();
+        for memtable in std::iter::once(&state.memtable).chain(&state.imm_memtables) {
+            let value = memtable.get(key);
+            if value.is_some() {
+                return Ok(value.filter(|b| !b.is_empty()));
+            }
+        }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -307,13 +316,13 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.put_and_maybe_freeze(key, value)
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.put_and_maybe_freeze(key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -338,7 +347,26 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let new_memtable = MemTable::create(self.next_sst_id());
+
+        {
+            // Acquire a Write guard, so that we have exclusive access to the state
+            // while performing all of the operations within this scope.
+            let mut state = self.state.write();
+            let mut new_state = state.as_ref().clone();
+
+            // Swap the current memtable with a new one
+            let current_memtable =
+                std::mem::replace(&mut new_state.memtable, Arc::new(new_memtable));
+
+            // Add current memtable to immutable memtables
+            new_state.imm_memtables.insert(0, current_memtable);
+
+            // Replace the current state
+            *state = Arc::new(new_state);
+        }
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
@@ -354,9 +382,40 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let iterators = {
+            let state = self.state.read();
+            iter::once(state.memtable.clone())
+                .chain(state.imm_memtables.iter().cloned())
+                .map(|memtable| memtable.scan(lower, upper))
+                .map(Box::new)
+                .collect()
+        };
+        let merge_iterator = MergeIterator::create(iterators);
+        LsmIterator::new(merge_iterator).map(FusedIterator::new)
+    }
+
+    fn put_and_maybe_freeze(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let memtable_size = {
+            let state = self.state.read();
+            state.memtable.put(key, value)?;
+            state.memtable.approximate_size()
+        };
+
+        if memtable_size > self.options.target_sst_size {
+            // It is possible that between the last check for `memtable_reaches_capacity_on_put`,
+            // another thread also checked and replaced the memtable.
+            // So we need to check again if current memtable reaches capacity,
+            // this time using state_lock to enforce atomicity.
+            let state_lock = self.state_lock.lock();
+            let memtable_size = self.state.read().memtable.approximate_size();
+            if memtable_size > self.options.target_sst_size {
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+
+        Ok(())
     }
 }
