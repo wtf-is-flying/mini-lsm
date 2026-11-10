@@ -1,0 +1,11 @@
+/Users/jacquesyves/.config/nixpkgs/overlays
+/Users/jacquesyves/.config/nixpkgs/overlays.nix
+/Users/jacquesyves/perso/mini-lsm/.devenv/bootstrap/bootstrapLib.nix
+/Users/jacquesyves/perso/mini-lsm/.devenv/bootstrap/default.nix
+/Users/jacquesyves/perso/mini-lsm/.devenv/bootstrap/resolve-lock.nix
+/Users/jacquesyves/perso/mini-lsm/.env
+/Users/jacquesyves/perso/mini-lsm/devenv.local.nix
+/Users/jacquesyves/perso/mini-lsm/devenv.lock
+/Users/jacquesyves/perso/mini-lsm/devenv.nix
+/Users/jacquesyves/perso/mini-lsm/devenv.yaml
+/tmp/devenv-714b5a6/processes/native-manager.pid
